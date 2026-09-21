@@ -821,7 +821,7 @@ dependencies = [
  "dcode-control-protocol",
  "dirs 6.0.0",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "globset",
  "grep-matcher",
  "grep-regex",
