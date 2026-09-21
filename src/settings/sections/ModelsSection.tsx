@@ -1,0 +1,377 @@
+import {
+  type CustomEndpoint,
+  compatModelIdForEndpoint,
+  DEFAULT_MODEL_ID,
+  PROVIDERS,
+  type ProviderId,
+} from "@/modules/ai/config";
+import {
+  type CustomEndpointKeys,
+  clearCustomEndpointKey,
+  clearKey,
+  getAllCustomEndpointKeys,
+  getAllKeys,
+  setCustomEndpointKey,
+  setKey,
+} from "@/modules/ai/lib/keyring";
+import { useChatStore } from "@/modules/ai/store/chatStore";
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import {
+  emitKeysChanged,
+  setCustomEndpoints,
+  setFavoriteModelIds,
+  setLmstudioBaseURL,
+  setLmstudioModelId,
+  setMlxBaseURL,
+  setMlxModelId,
+  setOllamaBaseURL,
+  setOllamaModelId,
+  setOpenaiCompatibleBaseURL,
+  setOpenaiCompatibleContextLimit,
+  setOpenaiCompatibleModelId,
+  setOpenrouterModelId,
+  setRecentModelIds,
+  setVertexAccountEmail,
+  setVertexLocation,
+  setVertexProjectId,
+} from "@/modules/settings/store";
+import { useEffect, useState } from "react";
+import { ProviderKeyCard } from "../components/ProviderKeyCard";
+import { SectionHeader } from "../components/SectionHeader";
+import { VertexProviderCard } from "../components/VertexProviderCard";
+import {
+  type KeysMap,
+  isLocalProvider,
+  LOCAL_META,
+  type LocalConfig,
+  Label,
+} from "./models/modelsShared";
+import { AddProviderMenu, DefaultsBlock } from "./models/ProviderPickers";
+import { LocalProviderCard } from "./models/LocalProviderCard";
+import { CustomEndpointCard } from "./models/CustomEndpointCard";
+import { VoiceBlock } from "./models/VoiceBlock";
+
+export function ModelsSection() {
+  const [keys, setKeys] = useState<KeysMap | null>(null);
+  const [epKeys, setEpKeys] = useState<CustomEndpointKeys>({});
+  const [adding, setAdding] = useState<Set<ProviderId>>(new Set());
+
+  const defaultModel = usePreferencesStore((s) => s.defaultModelId);
+  const lmstudioBaseURL = usePreferencesStore((s) => s.lmstudioBaseURL);
+  const lmstudioModelId = usePreferencesStore((s) => s.lmstudioModelId);
+  const mlxBaseURL = usePreferencesStore((s) => s.mlxBaseURL);
+  const mlxModelId = usePreferencesStore((s) => s.mlxModelId);
+  const ollamaBaseURL = usePreferencesStore((s) => s.ollamaBaseURL);
+  const ollamaModelId = usePreferencesStore((s) => s.ollamaModelId);
+  const compatBaseURL = usePreferencesStore((s) => s.openaiCompatibleBaseURL);
+  const compatModelId = usePreferencesStore((s) => s.openaiCompatibleModelId);
+  const compatContextLimit = usePreferencesStore(
+    (s) => s.openaiCompatibleContextLimit,
+  );
+  const openrouterModelId = usePreferencesStore((s) => s.openrouterModelId);
+  const vertexProjectId = usePreferencesStore((s) => s.vertexProjectId);
+  const vertexLocation = usePreferencesStore((s) => s.vertexLocation);
+  const vertexAccountEmail = usePreferencesStore((s) => s.vertexAccountEmail);
+  const customEndpoints = usePreferencesStore((s) => s.customEndpoints);
+
+  useEffect(() => {
+    void getAllKeys().then(setKeys);
+  }, []);
+
+  useEffect(() => {
+    void getAllCustomEndpointKeys(customEndpoints).then(setEpKeys);
+  }, [customEndpoints]);
+
+  const onSaveKey = async (provider: ProviderId, value: string) => {
+    await setKey(provider, value);
+    setKeys((prev) => (prev ? { ...prev, [provider]: value } : prev));
+    await emitKeysChanged();
+  };
+
+  const onClearKey = async (provider: ProviderId) => {
+    await clearKey(provider);
+    setKeys((prev) => (prev ? { ...prev, [provider]: null } : prev));
+    await emitKeysChanged();
+  };
+
+  const onVertexSignIn = async (refreshToken: string, email: string) => {
+    await onSaveKey("google-vertex", refreshToken);
+    await setVertexAccountEmail(email);
+  };
+
+  const onVertexSignOut = async () => {
+    await onClearKey("google-vertex");
+    await setVertexAccountEmail("");
+  };
+
+  const onSaveEndpointKey = async (endpointId: string, value: string) => {
+    await setCustomEndpointKey(endpointId, value);
+    setEpKeys((prev) => ({ ...prev, [endpointId]: value }));
+    await emitKeysChanged();
+  };
+
+  const onClearEndpointKey = async (endpointId: string) => {
+    await clearCustomEndpointKey(endpointId);
+    setEpKeys((prev) => ({ ...prev, [endpointId]: null }));
+    await emitKeysChanged();
+  };
+
+  const addCustomEndpoint = async () => {
+    const ep: CustomEndpoint = {
+      id: crypto.randomUUID().slice(0, 8),
+      name: "",
+      baseURL: "",
+      modelId: "",
+      contextLimit: 128_000,
+    };
+    await setCustomEndpoints([...customEndpoints, ep]);
+  };
+
+  const updateCustomEndpoint = async (
+    id: string,
+    patch: Partial<CustomEndpoint>,
+  ) => {
+    await setCustomEndpoints(
+      customEndpoints.map((e) => (e.id === id ? { ...e, ...patch } : e)),
+    );
+  };
+
+  const removeCustomEndpoint = async (id: string) => {
+    await clearCustomEndpointKey(id);
+    setEpKeys((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+
+    // Drop the now-dead model id from favorites/recents before touching the
+    // selection, so the recents push from a selection reset can't race it.
+    const deadModelId = compatModelIdForEndpoint(id);
+    const { favoriteModelIds, recentModelIds } = usePreferencesStore.getState();
+    if (favoriteModelIds.includes(deadModelId)) {
+      await setFavoriteModelIds(
+        favoriteModelIds.filter((m) => m !== deadModelId),
+      );
+    }
+    if (recentModelIds.includes(deadModelId)) {
+      await setRecentModelIds(recentModelIds.filter((m) => m !== deadModelId));
+    }
+
+    // If the deleted endpoint was the active model, the selection would dangle
+    // and the next send throws "Custom endpoint not found". Fall back to another
+    // endpoint when one remains, else the default model.
+    const remaining = customEndpoints.filter((e) => e.id !== id);
+    const { selectedModelId, setSelectedModelId } = useChatStore.getState();
+    if (selectedModelId === deadModelId) {
+      setSelectedModelId(
+        remaining[0]
+          ? compatModelIdForEndpoint(remaining[0].id)
+          : DEFAULT_MODEL_ID,
+      );
+    }
+
+    await setCustomEndpoints(remaining);
+  };
+
+  const localConfig = (id: ProviderId): LocalConfig | null => {
+    switch (id) {
+      case "lmstudio":
+        return {
+          baseURL: lmstudioBaseURL,
+          modelId: lmstudioModelId,
+          setBaseURL: setLmstudioBaseURL,
+          setModelId: setLmstudioModelId,
+        };
+      case "mlx":
+        return {
+          baseURL: mlxBaseURL,
+          modelId: mlxModelId,
+          setBaseURL: setMlxBaseURL,
+          setModelId: setMlxModelId,
+        };
+      case "ollama":
+        return {
+          baseURL: ollamaBaseURL,
+          modelId: ollamaModelId,
+          setBaseURL: setOllamaBaseURL,
+          setModelId: setOllamaModelId,
+        };
+      case "openai-compatible":
+        return {
+          baseURL: compatBaseURL,
+          modelId: compatModelId,
+          setBaseURL: setOpenaiCompatibleBaseURL,
+          setModelId: setOpenaiCompatibleModelId,
+          contextLimit: compatContextLimit,
+          setContextLimit: setOpenaiCompatibleContextLimit,
+        };
+      case "openrouter":
+        return {
+          baseURL: "",
+          modelId: openrouterModelId,
+          setBaseURL: async () => {},
+          setModelId: setOpenrouterModelId,
+          noBaseURL: true,
+        };
+      default:
+        return null;
+    }
+  };
+
+  const isConfigured = (id: ProviderId): boolean => {
+    if (id === "openrouter") return !!keys?.[id] && !!openrouterModelId.trim();
+    if (id === "google-vertex") return !!keys?.[id] && !!vertexProjectId.trim();
+    if (!isLocalProvider(id)) return !!keys?.[id];
+    const cfg = localConfig(id);
+    if (!cfg) return false;
+    if (id === "openai-compatible")
+      return !!cfg.baseURL.trim() && !!cfg.modelId.trim();
+    return !!cfg.modelId.trim();
+  };
+
+  if (!keys) {
+    return <div className="text-[12px] text-muted-foreground">Loading…</div>;
+  }
+
+  const configuredIds = new Set(
+    PROVIDERS.filter((p) => isConfigured(p.id)).map((p) => p.id),
+  );
+  const visibleIds = new Set<ProviderId>(configuredIds);
+  for (const id of adding) visibleIds.add(id);
+  const visibleProviders = PROVIDERS.filter(
+    (p) => p.id !== "openai-compatible" && visibleIds.has(p.id),
+  );
+  const addableProviders = PROVIDERS.filter(
+    (p) => p.id !== "openai-compatible" && !visibleIds.has(p.id),
+  );
+
+  const removeProvider = (id: ProviderId) => {
+    if (id === "openrouter") {
+      void setOpenrouterModelId("");
+      void onClearKey(id);
+    } else if (id === "google-vertex") {
+      void onVertexSignOut();
+    } else if (isLocalProvider(id)) {
+      const cfg = localConfig(id);
+      if (cfg) {
+        void cfg.setModelId("");
+        if (id === "openai-compatible") void cfg.setBaseURL("");
+      }
+      if (id === "openai-compatible") void onClearKey(id);
+    } else {
+      void onClearKey(id);
+    }
+    setAdding((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  const addProvider = (id: ProviderId) => {
+    setAdding((prev) => new Set(prev).add(id));
+  };
+
+  return (
+    <div className="flex flex-col gap-7">
+      <SectionHeader
+        title="Models"
+        description="Connect the providers you use. Keys live in your OS keychain and are used only by DCode-IDE."
+      />
+
+      <DefaultsBlock
+        defaultModel={defaultModel}
+        configuredIds={configuredIds}
+        keys={keys}
+        customEndpoints={customEndpoints}
+      />
+
+      <VoiceBlock />
+
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <Label>Providers</Label>
+          <AddProviderMenu
+            providers={addableProviders}
+            onAdd={addProvider}
+            onAddCompat={addCustomEndpoint}
+          />
+        </div>
+
+        {visibleProviders.length === 0 && customEndpoints.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border/60 bg-card/40 px-4 py-8 text-center">
+            <p className="text-[12px] text-muted-foreground">
+              No providers connected yet.
+            </p>
+            <p className="mt-0.5 text-[10.5px] text-muted-foreground/70">
+              Click "Add provider" to connect a cloud or local model source.
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {visibleProviders.map((p) =>
+              p.id === "google-vertex" ? (
+                <VertexProviderCard
+                  key={p.id}
+                  provider={p}
+                  refreshToken={keys[p.id]}
+                  projectId={vertexProjectId}
+                  location={vertexLocation}
+                  accountEmail={vertexAccountEmail}
+                  onSignIn={onVertexSignIn}
+                  onSignOut={onVertexSignOut}
+                  onProjectIdChange={setVertexProjectId}
+                  onLocationChange={setVertexLocation}
+                  onRemove={() => removeProvider(p.id)}
+                />
+              ) : p.id === "openrouter" ? (
+                <LocalProviderCard
+                  key={p.id}
+                  provider={p}
+                  configured={configuredIds.has(p.id)}
+                  config={localConfig(p.id)!}
+                  meta={LOCAL_META[p.id]!}
+                  compatKey={keys[p.id]}
+                  onSaveKey={(v) => onSaveKey(p.id, v)}
+                  onClearKey={() => onClearKey(p.id)}
+                  onRemove={() => removeProvider(p.id)}
+                />
+              ) : isLocalProvider(p.id) ? (
+                <LocalProviderCard
+                  key={p.id}
+                  provider={p}
+                  configured={configuredIds.has(p.id)}
+                  config={localConfig(p.id)!}
+                  meta={LOCAL_META[p.id]!}
+                  onSaveKey={(v) => onSaveKey(p.id, v)}
+                  onClearKey={() => onClearKey(p.id)}
+                  onRemove={() => removeProvider(p.id)}
+                />
+              ) : (
+                <ProviderKeyCard
+                  key={p.id}
+                  provider={p}
+                  currentKey={keys[p.id]}
+                  onSave={(v) => onSaveKey(p.id, v)}
+                  onClear={() => onClearKey(p.id)}
+                  onRemove={() => removeProvider(p.id)}
+                />
+              ),
+            )}
+            {customEndpoints.map((ep) => (
+              <CustomEndpointCard
+                key={ep.id}
+                endpoint={ep}
+                endpointKey={epKeys[ep.id] ?? null}
+                onSaveKey={(v) => onSaveEndpointKey(ep.id, v)}
+                onClearKey={() => onClearEndpointKey(ep.id)}
+                onUpdate={(patch) => updateCustomEndpoint(ep.id, patch)}
+                onRemove={() => removeCustomEndpoint(ep.id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
